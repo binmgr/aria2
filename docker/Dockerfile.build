@@ -1,0 +1,359 @@
+# =============================================================================
+# aria2 Build Environment
+# All 8 cross-compilation toolchains + pre-built static dependency libraries.
+# aria2 source is NOT included — it is downloaded at CI build time.
+# =============================================================================
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ---------------------------------------------------------------------------
+# Version pins
+# ---------------------------------------------------------------------------
+ENV ZIG_VERSION=0.14.0 \
+    LLVM_MINGW_VERSION=20241217 \
+    FREEBSD_VERSION=14.3-RELEASE \
+    OPENSSL_VERSION=3.5.4 \
+    ZLIB_VERSION=1.3.2 \
+    CARES_VERSION=1.34.9 \
+    LIBSSH2_VERSION=1.11.1 \
+    EXPAT_VERSION=2.10.0 \
+    SQLITE_VERSION=3540100 \
+    SQLITE_YEAR=2026
+
+# ---------------------------------------------------------------------------
+# Base build tools
+# clang/lld/llvm  — FreeBSD cross-compile + osxcross host compiler
+# mingw-w64       — Windows amd64 (GCC-based)
+# libxml2-dev + uuid-dev + libssl-dev — required by osxcross build.sh
+# cmake           — zlib Windows cross-build
+# ---------------------------------------------------------------------------
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    build-essential cmake pkg-config git curl wget \
+    autoconf automake libtool xz-utils bzip2 ca-certificates perl python3 \
+    clang lld llvm \
+    libxml2-dev uuid-dev libssl-dev zlib1g-dev \
+    mingw-w64 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Zig  (linux-amd64 and linux-arm64 musl cross-compiler)
+# ---------------------------------------------------------------------------
+RUN wget -q "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" \
+        -O /tmp/zig.tar.xz && \
+    mkdir -p /opt/zig && \
+    tar xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1 && \
+    rm /tmp/zig.tar.xz
+
+# ---------------------------------------------------------------------------
+# llvm-mingw  (Windows arm64 — clang-based UCRT cross-compiler)
+# ---------------------------------------------------------------------------
+RUN wget -q "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-20.04-x86_64.tar.xz" \
+        -O /tmp/llvm-mingw.tar.xz && \
+    mkdir -p /opt/llvm-mingw && \
+    tar xJf /tmp/llvm-mingw.tar.xz -C /opt/llvm-mingw --strip-components=1 && \
+    rm /tmp/llvm-mingw.tar.xz
+
+# ---------------------------------------------------------------------------
+# osxcross  (macOS amd64 + arm64 cross-compiler, MacOSX14.0 SDK)
+# ---------------------------------------------------------------------------
+RUN git clone --depth 1 https://github.com/tpoechtrager/osxcross.git /opt/osxcross && \
+    wget -q "https://github.com/joseluisq/macosx-sdks/releases/download/14.0/MacOSX14.0.sdk.tar.xz" \
+        -O /opt/osxcross/tarballs/MacOSX14.0.sdk.tar.xz && \
+    cd /opt/osxcross && \
+    UNATTENDED=1 ./build.sh && \
+    rm -rf /opt/osxcross/build
+
+# ---------------------------------------------------------------------------
+# FreeBSD sysroots  (amd64 and arm64) — headers + libraries only
+# ---------------------------------------------------------------------------
+RUN mkdir -p /opt/freebsd/amd64 /opt/freebsd/arm64 && \
+    wget -q "https://download.freebsd.org/releases/amd64/amd64/${FREEBSD_VERSION}/base.txz" \
+        -O /tmp/fbsd-amd64.txz && \
+    tar xJf /tmp/fbsd-amd64.txz -C /opt/freebsd/amd64 ./lib ./usr/lib ./usr/include && \
+    rm /tmp/fbsd-amd64.txz && \
+    wget -q "https://download.freebsd.org/releases/arm64/aarch64/${FREEBSD_VERSION}/base.txz" \
+        -O /tmp/fbsd-arm64.txz && \
+    tar xJf /tmp/fbsd-arm64.txz -C /opt/freebsd/arm64 ./lib ./usr/lib ./usr/include && \
+    rm /tmp/fbsd-arm64.txz
+
+# ---------------------------------------------------------------------------
+# Zig wrapper scripts for linux-musl cross-compile
+#
+# -static and -L<deps>/lib are baked into the CC/CXX wrappers because
+# autoconf's "C compiler works" test never passes LDFLAGS, and zig has no
+# default library search path.
+# ---------------------------------------------------------------------------
+RUN mkdir -p /opt/cross/bin && \
+    printf '#!/bin/sh\nexec /opt/zig/zig cc  -target x86_64-linux-musl  -static -L/opt/deps/linux-amd64/lib  "$@"\n' > /opt/cross/bin/x86_64-linux-musl-gcc  && \
+    printf '#!/bin/sh\nexec /opt/zig/zig c++ -target x86_64-linux-musl  -static -L/opt/deps/linux-amd64/lib  "$@"\n' > /opt/cross/bin/x86_64-linux-musl-g++  && \
+    printf '#!/bin/sh\nexec /opt/zig/zig ar "$@"\n'     > /opt/cross/bin/x86_64-linux-musl-ar     && \
+    printf '#!/bin/sh\nexec /opt/zig/zig ranlib "$@"\n' > /opt/cross/bin/x86_64-linux-musl-ranlib  && \
+    printf '#!/bin/sh\nexec llvm-strip "$@"\n'          > /opt/cross/bin/x86_64-linux-musl-strip   && \
+    printf '#!/bin/sh\nexec /opt/zig/zig cc  -target aarch64-linux-musl -static -L/opt/deps/linux-arm64/lib  "$@"\n' > /opt/cross/bin/aarch64-linux-musl-gcc  && \
+    printf '#!/bin/sh\nexec /opt/zig/zig c++ -target aarch64-linux-musl -static -L/opt/deps/linux-arm64/lib  "$@"\n' > /opt/cross/bin/aarch64-linux-musl-g++  && \
+    printf '#!/bin/sh\nexec /opt/zig/zig ar "$@"\n'     > /opt/cross/bin/aarch64-linux-musl-ar     && \
+    printf '#!/bin/sh\nexec /opt/zig/zig ranlib "$@"\n' > /opt/cross/bin/aarch64-linux-musl-ranlib  && \
+    printf '#!/bin/sh\nexec llvm-strip "$@"\n'          > /opt/cross/bin/aarch64-linux-musl-strip   && \
+    chmod +x /opt/cross/bin/*
+
+ENV PATH="/opt/cross/bin:/opt/zig:/opt/llvm-mingw/bin:/opt/osxcross/target/bin:${PATH}"
+
+# ---------------------------------------------------------------------------
+# Dependency sources (reused for all 8 targets)
+# ---------------------------------------------------------------------------
+RUN mkdir -p /opt/src && cd /opt/src && \
+    wget -q "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz" && \
+    wget -q "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" && \
+    wget -q "https://github.com/c-ares/c-ares/releases/download/v${CARES_VERSION}/c-ares-${CARES_VERSION}.tar.gz" && \
+    wget -q "https://github.com/libssh2/libssh2/releases/download/libssh2-${LIBSSH2_VERSION}/libssh2-${LIBSSH2_VERSION}.tar.gz" && \
+    wget -q "https://github.com/libexpat/libexpat/releases/download/R_$(echo "${EXPAT_VERSION}" | tr . _)/expat-${EXPAT_VERSION}.tar.gz" && \
+    wget -q "https://www.sqlite.org/${SQLITE_YEAR}/sqlite-autoconf-${SQLITE_VERSION}.tar.gz"
+
+# ---------------------------------------------------------------------------
+# Per-target toolchain definitions
+#
+# zig cc enables UBSan at -O0 (the default), which leaves __ubsan_* symbols
+# unresolved in static libs, so linux targets force -O2 -fno-sanitize=undefined.
+#
+# Sourced as:  . /opt/aria2-build/targets.sh; set_target <os>-<arch>
+# Exports: DEPS CC CXX AR RANLIB STRIP HOST CFLAGS LDFLAGS EXT OSNAME ARCHNAME
+#          OPENSSL_TARGET OPENSSL_EXTRA OPENSSL_MAKE_TARGET OPENSSL_INSTALL_TARGET
+#          ZLIB_CMAKE CMAKE_SYSTEM EXTRA_CONFIGURE
+# ---------------------------------------------------------------------------
+COPY <<'TARGETS' /opt/aria2-build/targets.sh
+set_target() {
+    TARGET="$1"
+    export DEPS="/opt/deps/${TARGET}"
+    export OSNAME="${TARGET%%-*}" ARCHNAME="${TARGET##*-}"
+    export EXT="" CFLAGS="" LDFLAGS="" ZLIB_CMAKE=0 OPENSSL_EXTRA=""
+    export OPENSSL_MAKE_TARGET="" OPENSSL_INSTALL_TARGET=install_sw EXTRA_CONFIGURE=""
+    case "${TARGET}" in
+    linux-amd64)
+        export CC=x86_64-linux-musl-gcc CXX=x86_64-linux-musl-g++ \
+               AR=x86_64-linux-musl-ar RANLIB=x86_64-linux-musl-ranlib \
+               STRIP=x86_64-linux-musl-strip HOST=x86_64-linux-musl \
+               OPENSSL_TARGET=linux-x86_64 \
+               OPENSSL_EXTRA="--openssldir=/etc/ssl" LDFLAGS="-static" \
+               CFLAGS="-O2 -fno-sanitize=undefined" ;;
+    linux-arm64)
+        export CC=aarch64-linux-musl-gcc CXX=aarch64-linux-musl-g++ \
+               AR=aarch64-linux-musl-ar RANLIB=aarch64-linux-musl-ranlib \
+               STRIP=aarch64-linux-musl-strip HOST=aarch64-linux-musl \
+               OPENSSL_TARGET=linux-aarch64 \
+               OPENSSL_EXTRA="--openssldir=/etc/ssl" LDFLAGS="-static" \
+               CFLAGS="-O2 -fno-sanitize=undefined" ;;
+    windows-amd64)
+        export CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ \
+               AR=x86_64-w64-mingw32-ar RANLIB=x86_64-w64-mingw32-ranlib \
+               STRIP=x86_64-w64-mingw32-strip HOST=x86_64-w64-mingw32 \
+               OPENSSL_TARGET=mingw64 ZLIB_CMAKE=1 EXT=.exe \
+               OPENSSL_MAKE_TARGET=build_libs OPENSSL_INSTALL_TARGET=install_dev \
+               LDFLAGS="-static" \
+               EXTRA_CONFIGURE="--without-wintls" ;;
+    windows-arm64)
+        export CC=aarch64-w64-mingw32-clang CXX=aarch64-w64-mingw32-clang++ \
+               AR=aarch64-w64-mingw32-ar RANLIB=aarch64-w64-mingw32-ranlib \
+               STRIP=aarch64-w64-mingw32-strip HOST=aarch64-w64-mingw32 \
+               OPENSSL_TARGET=mingw64 OPENSSL_EXTRA=no-asm ZLIB_CMAKE=1 EXT=.exe \
+               OPENSSL_MAKE_TARGET=build_libs OPENSSL_INSTALL_TARGET=install_dev \
+               LDFLAGS="-static" \
+               EXTRA_CONFIGURE="--without-wintls" ;;
+    darwin-amd64)
+        export CC=x86_64-apple-darwin23-clang CXX=x86_64-apple-darwin23-clang++ \
+               AR=x86_64-apple-darwin23-ar RANLIB=x86_64-apple-darwin23-ranlib \
+               STRIP=x86_64-apple-darwin23-strip HOST=x86_64-apple-darwin23 \
+               OPENSSL_TARGET=darwin64-x86_64-cc \
+               EXTRA_CONFIGURE="--without-appletls" ;;
+    darwin-arm64)
+        export CC=aarch64-apple-darwin23-clang CXX=aarch64-apple-darwin23-clang++ \
+               AR=aarch64-apple-darwin23-ar RANLIB=aarch64-apple-darwin23-ranlib \
+               STRIP=aarch64-apple-darwin23-strip HOST=aarch64-apple-darwin23 \
+               OPENSSL_TARGET=darwin64-arm64-cc \
+               EXTRA_CONFIGURE="--without-appletls" ;;
+    freebsd-amd64)
+        export CC=clang CXX=clang++ AR=llvm-ar RANLIB=llvm-ranlib STRIP=llvm-strip \
+               HOST=x86_64-unknown-freebsd14 OPENSSL_TARGET=BSD-x86_64 \
+               OPENSSL_EXTRA="--openssldir=/etc/ssl" \
+               CFLAGS="--sysroot=/opt/freebsd/amd64 --target=x86_64-unknown-freebsd14" \
+               LDFLAGS="--sysroot=/opt/freebsd/amd64 --target=x86_64-unknown-freebsd14 -fuse-ld=lld -static" ;;
+    freebsd-arm64)
+        export CC=clang CXX=clang++ AR=llvm-ar RANLIB=llvm-ranlib STRIP=llvm-strip \
+               HOST=aarch64-unknown-freebsd14 OPENSSL_TARGET=BSD-generic64 \
+               OPENSSL_EXTRA="--openssldir=/etc/ssl" \
+               CFLAGS="--sysroot=/opt/freebsd/arm64 --target=aarch64-unknown-freebsd14" \
+               LDFLAGS="--sysroot=/opt/freebsd/arm64 --target=aarch64-unknown-freebsd14 -fuse-ld=lld -static" ;;
+    *)
+        echo "unknown target: ${TARGET}" >&2
+        return 1 ;;
+    esac
+}
+TARGETS
+
+# ---------------------------------------------------------------------------
+# dep-build helper:  /opt/build-deps.sh <os>-<arch>
+# Builds zlib, OpenSSL, c-ares, libssh2, expat, sqlite as static libs.
+# ---------------------------------------------------------------------------
+COPY <<'BUILDSCRIPT' /opt/build-deps.sh
+#!/bin/sh
+set -eu
+
+. /opt/aria2-build/targets.sh
+set_target "${1:?need target}"
+
+SRCDIR=/opt/src
+NPROC=$(nproc 2>/dev/null || echo 4)
+HOSTARGS="--host=${HOST} --prefix=${DEPS} --enable-static --disable-shared"
+
+mkdir -p "${DEPS}"
+BUILD="$(mktemp -d /tmp/depbuild-XXXXXX)"
+trap 'rm -rf "${BUILD}"' EXIT
+cd "${BUILD}"
+
+# --- zlib ---
+tar xzf "${SRCDIR}/zlib-${ZLIB_VERSION}.tar.gz"
+if [ "${ZLIB_CMAKE}" = "1" ]; then
+    cmake -S "zlib-${ZLIB_VERSION}" -B "_zbuild" \
+        -DCMAKE_C_COMPILER="${CC}" \
+        -DCMAKE_SYSTEM_NAME=Windows \
+        -DCMAKE_INSTALL_PREFIX="${DEPS}" \
+        -DBUILD_SHARED_LIBS=OFF
+    cmake --build "_zbuild" -j"${NPROC}"
+    cmake --install "_zbuild"
+    # cmake names the static lib libzs.a; linker expects libz.a
+    ln -sf libzs.a "${DEPS}/lib/libz.a"
+else
+    cd "zlib-${ZLIB_VERSION}"
+    CHOST="${HOST}" CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" CFLAGS="${CFLAGS}" \
+        ./configure --prefix="${DEPS}" --static
+    make -j"${NPROC}"
+    make install
+    cd "${BUILD}"
+fi
+rm -rf "zlib-${ZLIB_VERSION}" "_zbuild" 2>/dev/null || true
+
+# --- OpenSSL ---
+tar xzf "${SRCDIR}/openssl-${OPENSSL_VERSION}.tar.gz"
+cd "openssl-${OPENSSL_VERSION}"
+# shellcheck disable=SC2086
+./Configure "${OPENSSL_TARGET}" --prefix="${DEPS}" --libdir=lib \
+    no-shared no-tests no-ui-console no-docs ${OPENSSL_EXTRA}
+# shellcheck disable=SC2086
+make -j"${NPROC}" ${OPENSSL_MAKE_TARGET}
+make ${OPENSSL_INSTALL_TARGET}
+cd "${BUILD}"
+rm -rf "openssl-${OPENSSL_VERSION}"
+
+# --- c-ares ---
+tar xzf "${SRCDIR}/c-ares-${CARES_VERSION}.tar.gz"
+cd "c-ares-${CARES_VERSION}"
+./configure ${HOSTARGS} --disable-tests --disable-tools \
+    CFLAGS="${CFLAGS}" LDFLAGS="${LDFLAGS}"
+make -j"${NPROC}"
+make install
+cd "${BUILD}"
+rm -rf "c-ares-${CARES_VERSION}"
+
+# --- libssh2 (OpenSSL backend) ---
+tar xzf "${SRCDIR}/libssh2-${LIBSSH2_VERSION}.tar.gz"
+cd "libssh2-${LIBSSH2_VERSION}"
+./configure ${HOSTARGS} --with-crypto=openssl --with-libssl-prefix="${DEPS}" \
+    --with-libz --with-libz-prefix="${DEPS}" \
+    --disable-examples-build --disable-docker-tests --disable-debug \
+    CFLAGS="-I${DEPS}/include ${CFLAGS}" LDFLAGS="-L${DEPS}/lib ${LDFLAGS}"
+make -j"${NPROC}"
+make install
+cd "${BUILD}"
+rm -rf "libssh2-${LIBSSH2_VERSION}"
+
+# --- expat ---
+tar xzf "${SRCDIR}/expat-${EXPAT_VERSION}.tar.gz"
+cd "expat-${EXPAT_VERSION}"
+./configure ${HOSTARGS} --without-docbook --without-examples --without-tests \
+    --without-xmlwf CFLAGS="${CFLAGS}" LDFLAGS="${LDFLAGS}"
+make -j"${NPROC}"
+make install
+cd "${BUILD}"
+rm -rf "expat-${EXPAT_VERSION}"
+
+# --- sqlite3 ---
+tar xzf "${SRCDIR}/sqlite-autoconf-${SQLITE_VERSION}.tar.gz"
+cd "sqlite-autoconf-${SQLITE_VERSION}"
+./configure ${HOSTARGS} --disable-readline \
+    CFLAGS="${CFLAGS} -DSQLITE_OMIT_LOAD_EXTENSION=1" LDFLAGS="${LDFLAGS}"
+make -j"${NPROC}"
+make install
+cd "${BUILD}"
+rm -rf "sqlite-autoconf-${SQLITE_VERSION}"
+
+echo "=== deps for ${TARGET} done ==="
+BUILDSCRIPT
+
+RUN chmod +x /opt/build-deps.sh
+
+# ===========================================================================
+# Build dependencies for each target
+# One layer per target for Docker cache granularity.
+# ===========================================================================
+RUN /opt/build-deps.sh linux-amd64
+RUN /opt/build-deps.sh linux-arm64
+RUN /opt/build-deps.sh windows-amd64
+RUN /opt/build-deps.sh windows-arm64
+RUN /opt/build-deps.sh darwin-amd64
+RUN /opt/build-deps.sh darwin-arm64
+RUN /opt/build-deps.sh freebsd-amd64
+RUN /opt/build-deps.sh freebsd-arm64
+
+# ---------------------------------------------------------------------------
+# build-aria2 <os>-<arch> <aria2-version> <output-dir>
+# Downloads the upstream tarball, configures against the target's static deps,
+# builds, strips, and writes aria2c-<os>-<arch>[.exe] into <output-dir>.
+# ---------------------------------------------------------------------------
+COPY <<'BUILDARIA2' /usr/local/bin/build-aria2
+#!/bin/sh
+set -eu
+
+TARGET="${1:?usage: build-aria2 <os>-<arch> <version> <output-dir>}"
+VERSION="${2:?usage: build-aria2 <os>-<arch> <version> <output-dir>}"
+OUTDIR="${3:?usage: build-aria2 <os>-<arch> <version> <output-dir>}"
+
+. /opt/aria2-build/targets.sh
+set_target "${TARGET}"
+
+WORK="$(mktemp -d /tmp/aria2build-XXXXXX)"
+trap 'rm -rf "${WORK}"' EXIT
+cd "${WORK}"
+
+wget -q "https://github.com/aria2/aria2/releases/download/release-${VERSION}/aria2-${VERSION}.tar.xz"
+tar xJf "aria2-${VERSION}.tar.xz"
+cd "aria2-${VERSION}"
+
+export PKG_CONFIG_PATH="${DEPS}/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR="${DEPS}/lib/pkgconfig"
+export PKG_CONFIG="pkg-config --static"
+export CFLAGS="${CFLAGS} -I${DEPS}/include -Os -Wno-date-time"
+export CXXFLAGS="${CFLAGS}"
+export CPPFLAGS="-I${DEPS}/include"
+export LDFLAGS="${LDFLAGS} -L${DEPS}/lib"
+export ARIA2_STATIC=yes
+
+# shellcheck disable=SC2086
+./configure --host="${HOST}" --prefix="${WORK}/output" \
+    --enable-static --disable-shared --disable-nls \
+    --with-openssl --with-libcares --with-libz --with-libexpat \
+    --with-libssh2 --with-sqlite3 \
+    --without-gnutls --without-libnettle --without-libgmp --without-libgcrypt \
+    --without-libxml2 --without-libuv --without-jemalloc --without-tcmalloc \
+    ${EXTRA_CONFIGURE} || { cat config.log; exit 1; }
+
+make -j"$(nproc)"
+
+mkdir -p "${OUTDIR}"
+"${STRIP}" "src/aria2c${EXT}" 2>/dev/null || strip "src/aria2c${EXT}" 2>/dev/null || true
+cp "src/aria2c${EXT}" "${OUTDIR}/aria2c-${OSNAME}-${ARCHNAME}${EXT}"
+BUILDARIA2
+
+RUN chmod +x /usr/local/bin/build-aria2 && rm -rf /opt/src
+
+WORKDIR /workspace
+CMD ["echo", "Usage: build-aria2 <os>-<arch> <aria2-version> <output-dir>"]

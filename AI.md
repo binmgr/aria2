@@ -47,7 +47,7 @@ All five CI providers (GitHub, Gitea, Forgejo, GitLab, Jenkins) are kept in lock
 
 ## Build image (`docker/Dockerfile.build`)
 
-- Base `ubuntu:22.04`. Toolchains: zig (linux musl amd64/arm64), mingw-w64 (windows-amd64), llvm-mingw (windows-arm64), osxcross + MacOSX14.0 SDK (darwin), clang + lld with FreeBSD 14.3 sysroots (freebsd).
+- Base `ubuntu:22.04`. Toolchains: zig (linux musl amd64/arm64), mingw-w64 (windows-amd64), llvm-mingw (windows-arm64), osxcross + MacOSX14.0 SDK (darwin), clang + lld with FreeBSD 14.5 sysroots (freebsd).
 - `/opt/aria2-build/targets.sh` defines `set_target <os>-<arch>`, the single source of per-target compiler, host triplet, OpenSSL target, and flags. Both dependency builds and `build-aria2` source it.
 - `/opt/build-deps.sh <target>` builds static zlib, OpenSSL, c-ares, libssh2, expat, SQLite into `/opt/deps/<target>`. One `RUN` layer per target for cache granularity.
 - `/usr/local/bin/build-aria2 <os>-<arch> <version> <outdir>` downloads the upstream tarball, configures with `ARIA2_STATIC=yes` against `/opt/deps/<target>`, builds, strips, and writes `aria2c-<os>-<arch>[.exe]` to `<outdir>`.

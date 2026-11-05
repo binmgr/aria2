@@ -28,6 +28,7 @@ The image is `FROM scratch` plus CA certificates (linux/amd64, linux/arm64).
 ```bash
 make build-env
 make build TARGET=linux-amd64 VERSION=1.37.0
+make test    # validate every workflow file with act
 ```
 
 Output lands in `binaries/`. Targets: `{linux,windows,darwin,freebsd}-{amd64,arm64}`.
@@ -35,7 +36,9 @@ Output lands in `binaries/`. Targets: `{linux,windows,darwin,freebsd}-{amd64,arm
 ## CI
 
 - `build-env-image.yml` builds `ghcr.io/binmgr/aria2:build` (toolchains and static deps) on `docker/Dockerfile.build` changes and quarterly.
-- `build-binaries.yml` builds all eight targets, publishes the release and runtime image monthly, after a build-image update, or manually.
+- `build-binaries.yml` builds all eight targets, then publishes the release and runtime image. It runs monthly, after a build-image update, on pushes touching `docker/Dockerfile`, or manually with an optional version.
+- `security.yml` runs truffleHog, the action-pinning policy check, and Trivy image scans.
+- The same pipeline is mirrored for Gitea (`.gitea/workflows/`), Forgejo (`.forgejo/workflows/`), GitLab CI (`.gitlab-ci.yml`), and Jenkins (`Jenkinsfile`, verification only). Non-GitHub pipelines pull the published build image or build it locally.
 
 ## License
 

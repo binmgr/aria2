@@ -119,7 +119,7 @@ RUN mkdir -p /opt/src && cd /opt/src && \
 # Sourced as:  . /opt/aria2-build/targets.sh; set_target <os>-<arch>
 # Exports: DEPS CC CXX AR RANLIB STRIP HOST CFLAGS LDFLAGS EXT OSNAME ARCHNAME
 #          OPENSSL_TARGET OPENSSL_EXTRA OPENSSL_MAKE_TARGET OPENSSL_INSTALL_TARGET
-#          ZLIB_CMAKE CMAKE_SYSTEM EXTRA_CONFIGURE
+#          ZLIB_CMAKE EXTRA_CONFIGURE EXTRA_LIBS
 # ---------------------------------------------------------------------------
 COPY <<'TARGETS' /opt/aria2-build/targets.sh
 set_target() {
@@ -127,7 +127,7 @@ set_target() {
     export DEPS="/opt/deps/${TARGET}"
     export OSNAME="${TARGET%%-*}" ARCHNAME="${TARGET##*-}"
     export EXT="" CFLAGS="" LDFLAGS="" ZLIB_CMAKE=0 OPENSSL_EXTRA=""
-    export OPENSSL_MAKE_TARGET="" OPENSSL_INSTALL_TARGET=install_sw EXTRA_CONFIGURE=""
+    export OPENSSL_MAKE_TARGET="" OPENSSL_INSTALL_TARGET=install_sw EXTRA_CONFIGURE="" EXTRA_LIBS=""
     case "${TARGET}" in
     linux-amd64)
         export CC=x86_64-linux-musl-gcc CXX=x86_64-linux-musl-g++ \
@@ -164,13 +164,15 @@ set_target() {
                AR=x86_64-apple-darwin23-ar RANLIB=x86_64-apple-darwin23-ranlib \
                STRIP=x86_64-apple-darwin23-strip HOST=x86_64-apple-darwin23 \
                OPENSSL_TARGET=darwin64-x86_64-cc \
-               EXTRA_CONFIGURE="--without-appletls" ;;
+               EXTRA_CONFIGURE="--without-appletls" \
+               EXTRA_LIBS="-framework Security -framework CoreFoundation" ;;
     darwin-arm64)
         export CC=aarch64-apple-darwin23-clang CXX=aarch64-apple-darwin23-clang++ \
                AR=aarch64-apple-darwin23-ar RANLIB=aarch64-apple-darwin23-ranlib \
                STRIP=aarch64-apple-darwin23-strip HOST=aarch64-apple-darwin23 \
                OPENSSL_TARGET=darwin64-arm64-cc \
-               EXTRA_CONFIGURE="--without-appletls" ;;
+               EXTRA_CONFIGURE="--without-appletls" \
+               EXTRA_LIBS="-framework Security -framework CoreFoundation" ;;
     freebsd-amd64)
         export CC=clang CXX=clang++ AR=llvm-ar RANLIB=llvm-ranlib STRIP=llvm-strip \
                HOST=x86_64-unknown-freebsd14 OPENSSL_TARGET=BSD-x86_64 \
@@ -336,6 +338,8 @@ export CXXFLAGS="${CFLAGS}"
 export CPPFLAGS="-I${DEPS}/include"
 export LDFLAGS="${LDFLAGS} -L${DEPS}/lib"
 export ARIA2_STATIC=yes
+# aria2 uses SecRandomCopyBytes on macOS, which lives in Security.framework
+export LIBS="${EXTRA_LIBS}"
 
 # shellcheck disable=SC2086
 ./configure --host="${HOST}" --prefix="${WORK}/output" \
